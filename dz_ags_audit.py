@@ -15,7 +15,7 @@ Version = "1.1";
 p_timeout = 15;
 #
 # Filename for the output report
-str_report_file = "ags_report_" + time.strftime("%Y%m%d") + ".txt";
+str_report_file = "dz_ags_audit_rpt_" + time.strftime("%Y%m%d") + ".txt";
 #
 #------------------------------------------------------------------------------
 
