@@ -9,3 +9,9 @@ The results can then be diffed with previous results to detect changes on a sing
 
 #### Existing Code
 The script in its current stage was banged out rather quickly in 2015 to support a third-party virtualization of my then AGS infrastructure.  I did not spend much time on the output format itself as sorting out the REST calls was work enough.  Ideally the text output of the script and the clunky sysout logging should be replaced perhaps with XML or something else more usable.  However it is functional and a good starting point for anyone interested in creating something more robust.
+
+#### Usage
+* Username or parameter 1: Must be an AGS or Portal user with administratve right on the AGS.
+* Passsword or parameter 2: The user's password
+* ArcGIS Server url or parameter 3: the base url of the AGS, such as http://fooags.blah.com or https://foo.blah.com:6443 
+* Portal url or parameter 4: if you need to retrieve your token from a federated portal, enter the base url of the portal such as http://fooportal.blah.com:7080 or https://fooportal.blah.com.  If your AGS is not federated to Portal, just ignore this item.
