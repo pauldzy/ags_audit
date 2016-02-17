@@ -1,18 +1,15 @@
 import sys,os
-import httplib, urllib, json
+import httplib, urllib, urllib2, json, contextlib
 import getpass, time
 from time import gmtime, strftime
 
 #------------------------------------------------------------------------------
 #
 # ArcGIS Services Audit Script
-Version = "1.1";
-# Last Modified: March 20, 2015
+Version = "2.0";
+# Last Modified: February 16, 2016
 #
 # These items may be changed as needed for your environment
-# 
-# Timeout for calling get token, the default is too long
-p_timeout = 15;
 #
 # Filename for the output report
 str_report_file = "dz_ags_audit_rpt_" + time.strftime("%Y%m%d") + ".txt";
@@ -30,9 +27,11 @@ class Reporter(object):
       self.file = open(self.filename,"a");
       self.writer = True;
       self.term = True;
+      
    def __del__(self):
       sys.stdout = self.terminal;
       self.file.close();      
+   
    def write(self,message):
       if self.term:
          self.terminal.write(message);
@@ -56,87 +55,135 @@ print " ";
 
 sys.stdout.writer = False;
 if len(sys.argv) > 4 and sys.argv[1].find(">") == -1:
-   ags_admin    = sys.argv[1];
-   ags_password = sys.argv[2];
-   ags_server   = sys.argv[3];
-   ags_port     = sys.argv[4];
-
+   ags_admin     = sys.argv[1];
+   ags_password  = sys.argv[2];
+   ags_server    = sys.argv[3];
+   portal_server = sys.argv[4];
+   
 else:
-   ags_admin    = raw_input("Enter user name: ");
-   ags_password = getpass.getpass("Enter password: ");
-   ags_server   = raw_input("Enter server url: ");
-   if ags_server[:7] == "http://":
-      ags_server = ags_server[7:];
-   elif ags_server[:8] == "https://":
-      ags_server = ags_server[8:];
-   ags_port     = raw_input("Enter port number [6080]: ") or "6080";
+   ags_admin     = raw_input("Enter user name: ");
+   ags_password  = getpass.getpass("Enter password: ");
+   
+   ags_server    = raw_input("Enter AGS url: ");
+   if ags_server[-1:] == "/":
+      ags_server = ags_server[:-1]
+      
+   portal_server = raw_input(
+      "Enter portal url if federated\n   [" + ags_server + "]: "
+   ) or ags_server;
+   
+   if portal_server[-1:] == "/":
+      portal_server = portal_server[:-1]
+   
    print " "
    
 sys.stdout.writer = True;
-print "AGS Admin : " + ags_admin
-print "AGS Server: " + ags_server + ":" + ags_port
+print "AGS Admin : " + ags_admin;
+print "AGS Server: " + ags_server;
+print "Portal Server: " + portal_server ;
 print " "
   
 #------------------------------------------------------------------------------
 # Step 30
 # Fetch token from server
 #------------------------------------------------------------------------------
-def getToken(username,password,serverName,serverPort,p_timeout):
-   # Token URL is typically http://server[:port]/arcgis/admin/generateToken
-   tokenURL = "/arcgis/admin/generateToken"
-    
-   # URL-encode the token parameters:-
-   params = urllib.urlencode({
-       'username': username
-      ,'password': password
-      ,'client': 'requestip'
-      ,'f': 'json'
-   })
-    
-   headers = {
-       "Content-type":"application/x-www-form-urlencoded"
-      ,"Accept":"text/plain"
+def submit_request(request):
+   """ Returns the response from an HTTP request in json format."""
+   with contextlib.closing(urllib2.urlopen(request)) as response:
+      job_info = json.load(response)
+      return job_info
+      
+def getPortalToken(username,password,agsUrl,portalUrl):
+   """ Returns an authentication token from Portal."""
+   
+   # Set the username and password parameters before getting the token. 
+   params = {
+       "username": username
+      ,"password": password
+      ,"referer" : agsUrl + "/arcgis/rest"
+      ,"f"       : "json"
    }
    
-   # Connect to URL and post parameters
-   try:
-      httpConn = httplib.HTTPConnection(serverName,serverPort,timeout=p_timeout)
-      httpConn.request("POST",tokenURL,params,headers)
-   except Exception as e:
-      print "Connecting to " + serverName + ":" + serverPort + " failed when requesting a token."
-      print "Please verify the AGS REST API administrative endpoint is accessible at this address."
-      print e;
-      exit(-100);
-   
-   # Read response
-   response = httpConn.getresponse()
-   if (response.status != 200):
-      httpConn.close()
-      print "Error while fetch tokens from admin URL. Please check the URL and try again."
-      return
-      
-   else:
-      data = response.read()
-      httpConn.close()
-           
-      # Extract the token from it
-      token = json.loads(data) 
+   token_url = portalUrl + "/portal/sharing/generateToken";
     
-      return token['token']
+   request = urllib2.Request(token_url,urllib.urlencode(params));
+   
+   try:   
+      token_response = submit_request(request);
+   
+   except:
+      # bounce on hard error once as http may simply die miserably
+      token_url = portalUrl.replace("http://", "https://") + "/portal/sharing/generateToken";
+      request = urllib2.Request(token_url,urllib.urlencode(params));
+      token_response = submit_request(request);
+   
+   if "token" in token_response:
+      token = token_response.get("token")
+      return token;
+   
+   else:
+      if "error" in token_response:
+         error_mess = token_response.get("error", {}).get("message");
+         
+         # Request for token must be made through HTTPS.
+         if "This request needs to be made over https." in error_mess:
+            portal_url = portalUrl.replace("http://", "https://")
+            token = get_token(username,password,agsUrl,portal_url)
+            return token;
+            
+         else:
+            raise Exception("Error: {} ".format(error_mess))
+
+def getToken(username,password,agsUrl,portalUrl):
+   """ Returns an authentication token from AGS."""
+
+   # Set the username and password parameters before getting the token. 
+   params = {
+       "username": username
+      ,"password": password
+      ,"referer" : agsUrl + "/arcgis/rest"
+      ,"f"       : "json"
+   }
+
+   token_url = agsUrl + "/arcgis/tokens/generateToken";
+    
+   request = urllib2.Request(token_url,urllib.urlencode(params));
+    
+   token_response = submit_request(request)
+    
+   if "token" in token_response:
+      token = token_response.get("token");
+      return token;
+   
+   else:
+      if "error" in token_response:
+         error_mess = token_response.get("error", {}).get("message");
+         
+         # Request for token must be made through HTTPS.
+         if "This request needs to be made over https." in error_mess:
+            ags_url = agsUrl.replace("http://", "https://")
+            token = getToken(username,password,ags_url,portalUrl)
+            return token;
+         
+         elif "You are not authorized to access this information" in error_mess:
+            token = getPortalToken(username,password,agsUrl,portalUrl);
+            return token;
+            
+         else:
+            raise Exception("Error: {} ".format(error_mess))
 
 sys.stdout.writer = False;
-print "Requesting admin token from " + ags_server + "... (timeout: " + str(p_timeout) + " seconds)";
+print "Requesting admin token...";
 
 token = getToken(
     username   = ags_admin
    ,password   = ags_password
-   ,serverName = ags_server
-   ,serverPort = ags_port
-   ,p_timeout  = p_timeout
+   ,agsUrl     = ags_server
+   ,portalUrl  = portal_server
 );
-
-if token == "":
-   print "Could not generate a token with the username and password provided."    
+   
+if token is None or token == "":
+   print "   Error, unable to acquire token."
    exit(-99);     
 
 print "  Success."
@@ -154,7 +201,7 @@ def assertJsonSuccess(data):
    else:
       return True;
 
-def fetchJson(ags_server,ags_port,token,serviceURL,addParams=None):
+def fetchJson(ags_server,token,serviceUrl,addParams=None):
    headers = {"Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"};
    
    baseParams = {'token': token, 'f': 'json'};
@@ -162,28 +209,22 @@ def fetchJson(ags_server,ags_port,token,serviceURL,addParams=None):
       baseParams.update(addParams);
    params = urllib.urlencode(baseParams);
    
-   httpConn = httplib.HTTPConnection(ags_server, ags_port);
-   httpConn.request("POST", serviceURL, params, headers);
+   req = urllib2.Request(ags_server + serviceUrl,params,headers);
+   response = urllib2.urlopen(req)
    
-   response = httpConn.getresponse();
-   if (response.status != 200):
-      httpConn.close();
-      raise NameError("Could not read service info information.");
-
    data = response.read();
    if not assertJsonSuccess(data):
       raise NameError("Error when reading service information. " + str(data));
    
    dataObj = json.loads(data);
-   httpConn.close();
+   response.close();
 
    return dataObj;
    
 basics = fetchJson(
     ags_server = ags_server
-   ,ags_port   = ags_port
    ,token      = token
-   ,serviceURL = "/arcgis/admin/info"
+   ,serviceUrl = "/arcgis/admin/info"
 );
 
 print "AGS Version: " + basics["currentversion"] + " Build " + basics["currentbuild"];
@@ -194,9 +235,8 @@ print "AGS Version: " + basics["currentversion"] + " Build " + basics["currentbu
 #------------------------------------------------------------------------------
 machines = fetchJson(
     ags_server = ags_server
-   ,ags_port   = ags_port
    ,token      = token
-   ,serviceURL = "/arcgis/admin/machines"
+   ,serviceUrl = "/arcgis/admin/machines"
 );
 
 for mach in machines["machines"]:
@@ -232,26 +272,25 @@ def parseConnection(input):
    
 services = fetchJson(
     ags_server = ags_server
-   ,ags_port   = ags_port
    ,token      = token
-   ,serviceURL = "/arcgis/admin/services"
+   ,serviceUrl = "/arcgis/admin/services"
 );
 
 folders = services["folders"];
 rootsrv = services["services"];
      
-def service_info(ags_server,ags_port,token,folderName,serviceName,serviceType):
+def service_info(ags_server,token,folderName,serviceName,serviceType):
 
    if folderName is None:
-      serviceURL = "/arcgis/admin/services/" + service["serviceName"] + "." + service["type"];
+      serviceUrl = "/arcgis/admin/services/" + serviceName + "." + serviceType;
+      
    else:
-      serviceURL = "/arcgis/admin/services/" + folder + "/" + child_serv["serviceName"] + "." + child_serv["type"];
+      serviceUrl = "/arcgis/admin/services/" + folder + "/" + serviceName + "." + serviceType;
 
    srv_prop = fetchJson(
        ags_server = ags_server
-      ,ags_port   = ags_port
       ,token      = token
-      ,serviceURL = serviceURL
+      ,serviceUrl = serviceUrl
    );
    
    if "capabilities" in srv_prop:
@@ -272,7 +311,7 @@ def service_info(ags_server,ags_port,token,folderName,serviceName,serviceType):
          if "maxRecordCount" in srv_prop["properties"]:   
             int_max_record = srv_prop["properties"]["maxRecordCount"];
          if "isCached" in srv_prop["properties"]:
-            print "  Cached: " + srv_prop["properties"]["isCached"] + ", " + int_max_record + " max records" 
+            print "  Cached: " + srv_prop["properties"]["isCached"] + ", " + str(int_max_record) + " max records" 
          if "minScale" in srv_prop["properties"]:
             print "  Minimum Scale: " + srv_prop["properties"]["minScale"]
       if "enableDynamicLayers" in srv_prop["properties"]:
@@ -290,14 +329,86 @@ def service_info(ags_server,ags_port,token,folderName,serviceName,serviceType):
       print "  Min Instances: " + str(srv_prop["minInstancesPerNode"]) + ", Max Instances: " + str(srv_prop["maxInstancesPerNode"]);
       
    if "schemaLockingEnabled" in srv_prop:
-      print "  Schema Locking: " + srv_prop["schemaLockingEnabled"]
+      print "  Schema Locking: " + srv_prop["schemaLockingEnabled"];
+      
+   # Rather annoyingly, critical image services properties are not exposed in the admin info endpoint
+   if serviceType == "ImageServer":
+      if folderName is None:
+         serviceUrl = "/arcgis/rest/services/" + serviceName + "/" + serviceType;
+      
+      else:
+         serviceUrl = "/arcgis/rest/services/" + folder + "/" + serviceName + "/" + serviceType;
+      
+      srv_prop = fetchJson(
+          ags_server = ags_server
+         ,token      = token
+         ,serviceUrl = serviceUrl
+      );
+   
+      if "extent" in srv_prop:
+         str_extent = "[";
          
+         if "xmin" in srv_prop["extent"]:
+            str_extent += str(srv_prop["extent"]["xmin"]) + ",";
+         else:
+            str_extent += "None,";
+        
+         if "ymin" in srv_prop["extent"]:
+            str_extent += str(srv_prop["extent"]["ymin"]) + ",";
+         else:
+            str_extent += "None,";
+            
+         if "xmax" in srv_prop["extent"]:
+            str_extent += str(srv_prop["extent"]["xmax"]) + ",";
+         else:
+            str_extent += "None,";
+            
+         if "ymax" in srv_prop["extent"]:
+            str_extent += str(srv_prop["extent"]["ymax"]) + "]";
+         else:
+            str_extent += "None]";
+            
+         if "spatialReference" in srv_prop["extent"]:
+            str_extent += " wkid: " + str(srv_prop["extent"]["spatialReference"]["wkid"]);
+         else:
+            str_extent += " wkid: None";
+            
+         print "  Extent: " + str_extent;
+      
+      if "pixelSizeX" in srv_prop:
+         print "  pixelSizeX: " + str(srv_prop["pixelSizeX"]);
+      
+      if "pixelSizeY" in srv_prop:
+         print "  pixelSizeY: " + str(srv_prop["pixelSizeY"]);
+         
+      if "bandCount" in srv_prop:
+         print "  bandCount: " + str(srv_prop["bandCount"]); 
+         
+      if "pixelType" in srv_prop:
+         print "  pixelType: " + srv_prop["pixelType"]; 
+         
+      if "serviceDataType" in srv_prop:
+         print "  serviceDataType: " + srv_prop["serviceDataType"];
+         
+      if "defaultMosaicMethod" in srv_prop:
+         print "  defaultMosaicMethod: " + srv_prop["defaultMosaicMethod"];
+         
+      if "hasHistograms" in srv_prop:
+         print "  hasHistograms: " + str(srv_prop["hasHistograms"]);
+         
+      if "hasColormap" in srv_prop:
+         print "  hasColormap: " + str(srv_prop["hasColormap"]);
+         
+      if "spatialReference" in srv_prop:
+         print "  spatialReference: " + str(srv_prop["spatialReference"]["wkid"]);   
+   
+   # Interrogate the manifest for information on data services.  Note the manifest only
+   # exists for services created after 10.3 or so.   
    try:
       manifest = fetchJson(
           ags_server = ags_server
-         ,ags_port   = ags_port
          ,token      = token
-         ,serviceURL = serviceURL + "/iteminfo/manifest/manifest.json"
+         ,serviceUrl = serviceUrl + "/iteminfo/manifest/manifest.json"
       );
       
    except:
@@ -332,10 +443,9 @@ def service_info(ags_server,ags_port,token,folderName,serviceName,serviceType):
 for service in rootsrv:
    print "<ROOT>"
    print service["serviceName"] + " (" + service["type"] + ")"
-   
+  
    service_info(
        ags_server = ags_server
-      ,ags_port   = ags_port
       ,token      = token
       ,folderName = None
       ,serviceName = service["serviceName"]
@@ -346,9 +456,8 @@ for folder in folders:
    if folder not in ['System','Utilities']:
       child_services = fetchJson(
           ags_server = ags_server
-         ,ags_port   = ags_port
          ,token      = token
-         ,serviceURL = "/arcgis/admin/services/" + folder
+         ,serviceUrl = "/arcgis/admin/services/" + folder
       );
       for child_serv in child_services["services"]:
       
@@ -357,7 +466,6 @@ for folder in folders:
          
          service_info(
              ags_server  = ags_server
-            ,ags_port    = ags_port
             ,token       = token
             ,folderName  = folder
             ,serviceName = child_serv["serviceName"]
@@ -372,9 +480,8 @@ print "---------------------------------";
 #------------------------------------------------------------------------------
 ds_folders = fetchJson(
     ags_server = ags_server
-   ,ags_port   = ags_port
    ,token      = token
-   ,serviceURL = "/arcgis/admin/data/findItems"
+   ,serviceUrl = "/arcgis/admin/data/findItems"
    ,addParams  = {"parentPath":"/fileShares"}
 );
 
@@ -395,9 +502,8 @@ for ds in ds_folders["items"]:
 #------------------------------------------------------------------------------
 ds_databases = fetchJson(
     ags_server = ags_server
-   ,ags_port   = ags_port
    ,token      = token
-   ,serviceURL = "/arcgis/admin/data/findItems"
+   ,serviceUrl = "/arcgis/admin/data/findItems"
    ,addParams  = {"parentPath":"/enterpriseDatabases"}
 );
 
@@ -428,4 +534,3 @@ sys.stdout.writer = True;
 print " ";  
 print "---------------------------------";
 print " ";
-    
